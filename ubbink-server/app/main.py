@@ -93,6 +93,9 @@ class ModbusManager:
 
         self.cached_data = data
         self.last_data_access_time = current_time
+        # Update write-throttle timestamp so a write immediately after a
+        # cache-miss read respects the same minimum inter-command gap.
+        self.last_access_time = current_time
         return data
 
     def set_airflow_mode(self, mode: str) -> dict:
@@ -141,6 +144,27 @@ class ModbusManager:
 
         return response
 
+    def set_bypass_mode(self, mode: str) -> dict:
+        """Set bypass mode (auto / open / closed) on the device."""
+        self._wait_for_access()
+        with self.lock:
+            modbus = ModbusController()
+            if not modbus.connect():
+                return {"error": "Could not connect to device"}
+
+            response = modbus.set_bypass_mode(mode)
+
+            # Fetch fresh data and update cache
+            new_data = modbus.get_data()
+            modbus.disconnect()
+
+        self.cached_data = new_data
+        self.last_data_access_time = time.monotonic()
+
+        return response
+
+
+BYPASS_MODES = {"auto", "open", "closed"}
 
 # Instantiate a single manager instance for the entire application
 modbus_manager = ModbusManager(
@@ -187,5 +211,19 @@ def set_airflow_rate(request: Request, rate: int):
     logger.info(f"📡 Request from {client_ip}: /set_rate?rate={rate}")
 
     response = modbus_manager.set_airflow_rate(rate)
+    logger.info(f"📤 Response to {client_ip}: {response}")
+    return response
+
+
+@app.post("/set_bypass", dependencies=[Depends(authenticate)])
+@app.get("/set_bypass", dependencies=[Depends(authenticate)])
+def set_bypass_mode(request: Request, mode: str):
+    client_ip = get_client_ip(request)
+    logger.info(f"📡 Request from {client_ip}: /set_bypass?mode={mode}")
+
+    if mode not in BYPASS_MODES:
+        return {"error": f"Invalid mode. Valid values: {sorted(BYPASS_MODES)}"}
+
+    response = modbus_manager.set_bypass_mode(mode)
     logger.info(f"📤 Response to {client_ip}: {response}")
     return response
