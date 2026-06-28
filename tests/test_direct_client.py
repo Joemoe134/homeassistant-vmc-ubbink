@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock
+import unittest.mock as mock
 
 import pytest
 
@@ -15,12 +16,6 @@ class FakeClock:
 
 
 def _device_returning(values):
-    """VigorDevice-like stub driven by direct._READERS (the source of truth).
-
-    Each reader's getter returns the matching entry from `values`; readers not
-    listed in `values` fall back to a deterministic placeholder, so adding a new
-    entry to _READERS doesn't require touching this helper.
-    """
     dev = MagicMock()
     for key, getter in direct._READERS.items():
         getattr(dev, getter).return_value = values.get(key, f"<{key}>")
@@ -41,6 +36,7 @@ _FULL = {
     "extract_airflow_preset": 150,
     "airflow_mode": "normal",
     "bypass_status": "open",
+    "bypass_mode": "auto",
     "filter_status": "normal",
 }
 
@@ -49,8 +45,6 @@ def test_get_data_returns_all_keys():
     dev = _device_returning(_FULL)
     client = direct.DirectClient("1.2.3.4", 502, 20, _device=dev, _clock=FakeClock())
     data = client.get_data()
-    # Source of truth is the reader map, not a frozen snapshot: adding a sensor
-    # to direct._READERS should not require editing this test.
     assert set(data.keys()) == set(direct._READERS)
     assert data["supply_temperature"] == 21.5
     assert data["supply_humidity"] == 45
@@ -61,7 +55,7 @@ def test_get_data_caches_within_ttl():
     clock = FakeClock()
     client = direct.DirectClient("1.2.3.4", 502, 20, _device=dev, _clock=clock)
     client.get_data()
-    client.get_data()  # within TTL → no second poll
+    client.get_data()
     assert dev.get_serial_number.call_count == 1
 
 
@@ -70,7 +64,7 @@ def test_get_data_repolls_after_ttl():
     clock = FakeClock()
     client = direct.DirectClient("1.2.3.4", 502, 20, _device=dev, _clock=clock)
     client.get_data()
-    clock.t += 10  # > CACHE_TTL
+    clock.t += 10
     client.get_data()
     assert dev.get_serial_number.call_count == 2
 
@@ -81,7 +75,7 @@ def test_field_level_error_becomes_none():
     client = direct.DirectClient("1.2.3.4", 502, 20, _device=dev, _clock=FakeClock())
     data = client.get_data()
     assert data["supply_humidity"] is None
-    assert data["supply_temperature"] == 21.5  # other fields still populated
+    assert data["supply_temperature"] == 21.5
 
 
 def test_set_airflow_rate_invalidates_cache():
@@ -92,7 +86,7 @@ def test_set_airflow_rate_invalidates_cache():
     assert dev.get_serial_number.call_count == 1
     client.set_airflow_rate(200)
     dev.set_custom_airflow_rate.assert_called_once_with(200)
-    client.get_data()  # cache invalidated → re-poll even within TTL
+    client.get_data()
     assert dev.get_serial_number.call_count == 2
 
 
@@ -103,11 +97,32 @@ def test_set_airflow_mode_delegates():
     dev.set_airflow_mode.assert_called_once_with("high")
 
 
-def test_set_bypass_mode_is_noop():
+def test_set_bypass_mode_delegates():
     dev = _device_returning(_FULL)
     client = direct.DirectClient("1.2.3.4", 502, 20, _device=dev, _clock=FakeClock())
-    result = client.set_bypass_mode("auto")
+    result = client.set_bypass_mode("open")
+    dev.set_bypass_mode.assert_called_once_with("open")
     assert "error" not in result
-    assert not dev.method_calls or all(
-        not str(c).startswith("set_bypass_mode") for c in dev.method_calls
-    )
+
+
+def test_set_bypass_mode_invalidates_cache():
+    dev = _device_returning(_FULL)
+    clock = FakeClock()
+    client = direct.DirectClient("1.2.3.4", 502, 20, _device=dev, _clock=clock)
+    client.get_data()
+    assert dev.get_serial_number.call_count == 1
+    client.set_bypass_mode("closed")
+    client.get_data()
+    assert dev.get_serial_number.call_count == 2
+
+
+def test_write_throttle_enforces_minimum_interval():
+    dev = _device_returning(_FULL)
+    clock = FakeClock()
+    client = direct.DirectClient("1.2.3.4", 502, 20, _device=dev, _clock=clock)
+    client._last_bus_ts = clock.t
+    clock.t += direct.MIN_WRITE_INTERVAL / 2
+    with mock.patch("direct.time.sleep") as mock_sleep:
+        client.set_airflow_mode("high")
+    assert mock_sleep.called
+    assert mock_sleep.call_args[0][0] > 0
