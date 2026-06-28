@@ -156,3 +156,42 @@ class VigorDevice:
         else:
             preset = value
         self._write(8002, preset)
+
+    # ------------------------------------------------------ bypass mode (6100)
+
+    _BYPASS_MODE_FROM_6100 = {0: "auto", 1: "closed", 2: "open"}
+    _BYPASS_MODE_TO_6100 = {"auto": 0, "closed": 1, "open": 2}
+
+    def get_bypass_mode(self):
+        """Read bypass control mode from holding register 6100.
+
+        Returns one of: 'auto', 'open', 'closed'.
+        """
+        value = self._read_holding(6100)[0]
+        return self._BYPASS_MODE_FROM_6100.get(value, f"unknown ({value})")
+
+    def set_bypass_mode(self, mode):
+        """Write bypass control mode to holding register 6100.
+
+        mode: 'auto'   – device decides based on temperature conditions (default)
+              'open'   – force bypass open (summer ventilation / free cooling)
+              'closed' – force bypass closed (keep heat exchanger active)
+
+        Note on register 8000 (Modbus control mode):
+            Register 8000 gates the 8001/8002 *airflow command* registers only.
+            Register 6100 is in the 6000-7992 *setting parameter* range, which
+            the Brink documentation (UWA2-B/UWA2-E 614882-H) explicitly states
+            can be "read and written" independently of 8000. No set_modbus_mode()
+            call is required here. Verify on first hardware test.
+        """
+        if mode not in self._BYPASS_MODE_TO_6100:
+            raise ValueError(
+                f"Invalid bypass mode {mode!r}. Valid: {list(self._BYPASS_MODE_TO_6100)}"
+            )
+        value = self._BYPASS_MODE_TO_6100[mode]
+        current = self._read_holding(6100)[0]
+        if current != value:
+            _LOGGER.debug("set_bypass_mode: %r -> register 6100 = %d", mode, value)
+            self._write(6100, value)
+        else:
+            _LOGGER.debug("set_bypass_mode: already %r, no write needed", mode)
